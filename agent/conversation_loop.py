@@ -3835,17 +3835,24 @@ def run_conversation(
             # Self-escalation: detect [ESCALATE_THINKING: true] and re-run with thinking ON
             if _thinking_state is not None:
                 try:
-                    from agent.self_escalation import detect_escalation, escalate, strip_escalation_marker
+                    from agent.self_escalation import detect_escalation, escalate, strip_escalation_marker, extract_escalation_reason
                     if detect_escalation(assistant_message.content or "", _thinking_state):
+                        # Extract reason BEFORE stripping markers
+                        escalation_reason = extract_escalation_reason(
+                            assistant_message.content or "", _thinking_state
+                        )
                         if escalate(_thinking_state):
                             # Strip the escalation marker from content
                             if assistant_message.content:
                                 assistant_message.content = strip_escalation_marker(
                                     assistant_message.content, _thinking_state
                                 )
-                            logger.debug("[self-escalation] Re-running iteration with thinking ON")
+                            logger.debug("[self-escalation] Re-running iteration with thinking ON (reason: %s)", escalation_reason or "none")
                             if not agent.quiet_mode:
-                                agent._vprint(f"{agent.log_prefix}🧠 Self-escalation: switching to thinking ON...")
+                                if escalation_reason:
+                                    agent._vprint(f"{agent.log_prefix}🧠 Self-escalation ON: {escalation_reason}")
+                                else:
+                                    agent._vprint(f"{agent.log_prefix}🧠 Self-escalation: switching to thinking ON...")
                             api_call_count -= 1  # Don't count this short iteration
                             try:
                                 agent.iteration_budget.refund()

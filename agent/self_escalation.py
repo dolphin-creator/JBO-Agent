@@ -228,6 +228,28 @@ def escalate(state: ThinkingState) -> bool:
     return True
 
 
+def extract_escalation_reason(content: str, state: ThinkingState) -> str:
+    """Extract the reason given by the model for escalation.
+
+    Looks for [RAISON: ...] lines and returns their text (without the
+    brackets). Returns empty string if no reason is found.
+    """
+    if not content:
+        return ""
+    for line in content.split("\n"):
+        stripped = line.strip()
+        if stripped.startswith("[RAISON:"):
+            # [RAISON: bla bla]  or  [RAISON: bla bla
+            text = stripped[len("[RAISON:"):].rstrip("]").strip()
+            if text:
+                return text
+        elif stripped.startswith("[RAISON :"):
+            text = stripped[len("[RAISON :"):].rstrip("]").strip()
+            if text:
+                return text
+    return ""
+
+
 def strip_escalation_marker(content: str, state: ThinkingState) -> str:
     """Remove the escalation marker and reason from the model response.
 
