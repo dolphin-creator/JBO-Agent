@@ -103,9 +103,9 @@ def inject_thinking_kwargs(
     # ALL providers: use extra_body (SDK-compatible)
     api_kwargs.setdefault("extra_body", {})["chat_template_kwargs"] = kwargs
 
-    logger.debug(
-        "[self-escalation] Injected chat_template_kwargs: %s (provider=%s)",
-        kwargs,
+    logger.info(
+        "[self-escalation] Injected thinking=%s (provider=%s)",
+        state.active,
         provider,
     )
     return api_kwargs
@@ -176,15 +176,47 @@ def inject_thinking_prompt(
     effective_system: str,
     state: ThinkingState,
 ) -> str:
-    """Append thinking-mode instructions to the effective system prompt.
+    """DEPRECATED — kept for backward compat. Use inject_thinking_message instead.
 
-    NOTE: This is called on the api_messages copy, not on the cached
-    system prompt. The prompt cache remains byte-stable across turns.
+    Appending to the system prompt invalidates KV cache on llama.cpp because
+    the system prompt is at the start of the context. This caused 50-60s
+    prefill penalties on every turn where thinking mode changed.
     """
     if not state.enabled:
         return effective_system
 
     return effective_system + build_thinking_prompt(state)
+
+
+def inject_thinking_message(
+    api_messages: list,
+    state: ThinkingState,
+) -> list:
+    """Inject thinking-mode instructions as a user message at the END of the
+    message list — NOT in the system prompt.
+
+    This keeps the system prompt byte-stable across turns so the KV cache
+    prefix (system + conversation history) is never invalidated by thinking
+    mode changes. The thinking instructions are appended as a role="user"
+    message with a special content prefix so the model knows it's a directive.
+
+    Returns the modified api_messages list (in-place, for efficiency).
+    """
+    if not state.enabled:
+        return api_messages
+
+    thinking_block = build_thinking_prompt(state)
+    if not thinking_block.strip():
+        return api_messages
+
+    # Append as a user message at the end — after all conversation history.
+    # This is the LAST new token the model sees, so it doesn't invalidate
+    # the KV cache prefix (system prompt + history).
+    api_messages.append({
+        "role": "user",
+        "content": f"---\n{thinking_block.strip()}\n---",
+    })
+    return api_messages
 
 
 def detect_escalation(content: str, state: ThinkingState) -> bool:
@@ -222,12 +254,37 @@ def escalate(state: ThinkingState) -> bool:
 
     state.active = True
     state.escalation_count += 1
-    logger.debug(
-        "[self-escalation] Escalated to thinking ON (count: %d/%d)",
+    logger.info(
+        "[self-escalation] ESCALATED to thinking ON (count: %d/%d)",
         state.escalation_count,
         state.max_escalations,
     )
     return True
+
+
+def log_reasoning_trace(content: str, state: ThinkingState) -> None:
+    """Log a summary of the model response after thinking ON was active.
+
+    Writes an INFO-level log so we can verify in agent.log that the model
+    actually produced reasoning after escalation.  Logs a 200-char snippet
+    to confirm the thinking trace is non-empty and meaningful.
+    """
+    if not state.active:
+        return
+    if not content:
+        return
+
+    logger.info(
+        "[self-escalation] thinking ON active for response (%d chars)",
+        len(content),
+    )
+
+    # Log a snippet to verify reasoning happened
+    snippet = content[:200].replace("\n", " ")
+    logger.info(
+        "[self-escalation] Reasoning trace: %s...",
+        snippet,
+    )
 
 
 def extract_escalation_reason(content: str, state: ThinkingState) -> str:
@@ -235,7 +292,7 @@ def extract_escalation_reason(content: str, state: ThinkingState) -> str:
 
     Looks for [RAISON: ...] lines and returns their text (without the
     brackets). Returns empty string if no reason is found.
-    
+
     The reason is truncated to 50 characters to avoid polluting context.
     """
     if not content:

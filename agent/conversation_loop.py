@@ -808,15 +808,21 @@ def run_conversation(
         effective_system = active_system_prompt or ""
         if agent.ephemeral_system_prompt:
             effective_system = (effective_system + "\n\n" + agent.ephemeral_system_prompt).strip()
-        # Self-escalation: inject thinking-mode instructions (API-time only, not cached)
-        if _thinking_state is not None and _thinking_state.enabled:
-            try:
-                from agent.self_escalation import inject_thinking_prompt
-                effective_system = inject_thinking_prompt(effective_system, _thinking_state)
-            except Exception:
-                pass
+        # NOTE: thinking-mode instructions are NOT injected here anymore.
+        # They are appended as a user message at the END of api_messages
+        # (via inject_thinking_message below) to keep the system prompt
+        # byte-stable and preserve KV cache across turns on llama.cpp.
         if effective_system:
             api_messages = [{"role": "system", "content": effective_system}] + api_messages
+
+        # Self-escalation: inject thinking-mode instructions as a trailing
+        # user message — NOT in system prompt (KV cache safety).
+        if _thinking_state is not None and _thinking_state.enabled:
+            try:
+                from agent.self_escalation import inject_thinking_message
+                inject_thinking_message(api_messages, _thinking_state)
+            except Exception:
+                pass
 
         # Inject ephemeral prefill messages right after the system prompt
         # but before conversation history. Same API-call-time-only pattern.
@@ -3849,7 +3855,10 @@ def run_conversation(
                                 assistant_message.content = strip_escalation_marker(
                                     assistant_message.content, _thinking_state
                                 )
-                            logger.debug("[self-escalation] Re-running iteration with thinking ON (reason: %s)", escalation_reason or "none")
+                            logger.info(
+                                "[self-escalation] ESCALATION TRIGGERED: re-running iteration with thinking ON (reason: %s)",
+                                escalation_reason or "none",
+                            )
                             if not agent.quiet_mode:
                                 if escalation_reason:
                                     agent._vprint(f"{agent.log_prefix}🧠 Self-escalation ON: {escalation_reason}")
@@ -3862,7 +3871,7 @@ def run_conversation(
                                 pass
                             continue
                 except Exception as _se_err:
-                    logger.debug("[self-escalation] Detection error: %s", _se_err)
+                    logger.info("[self-escalation] Detection error: %s", _se_err)
 
             # Check for tool calls
             if assistant_message.tool_calls:
@@ -4256,6 +4265,16 @@ def run_conversation(
                         and final_response):
                     reason_prefix = f"*🧠 Thinking activé : {_thinking_state.escalation_reason}*\n\n"
                     final_response = reason_prefix + final_response
+                
+                # Self-escalation: trace reasoning output in logs
+                if (_thinking_state is not None 
+                        and _thinking_state.active 
+                        and final_response):
+                    try:
+                        from agent.self_escalation import log_reasoning_trace
+                        log_reasoning_trace(final_response, _thinking_state)
+                    except Exception:
+                        pass
                 
                 # Self-escalation: reset for next user turn
                 if _thinking_state is not None:
